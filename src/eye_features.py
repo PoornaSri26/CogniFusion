@@ -25,6 +25,7 @@ missing keys via fill values.
 """
 import numpy as np
 import pandas as pd
+from scipy.signal import welch
 
 # percentile levels used for speed/error summaries
 _PCTLS = (50, 90, 95)
@@ -197,12 +198,22 @@ def _pupillometry_features(pupil_data, t):
     
     dilation_episodes = np.sum(rate > 0.01)  # dilation threshold
     constriction_episodes = np.sum(rate < -0.01)  # constriction threshold
-    
+
+    # Low frequency pupillometry oscillation power (0.1 - 0.5 Hz - cognitive hippus)
+    if len(pupil_clean) >= 30:
+        fs_pupil = 1.0 / (np.median(dt_clean) + 1e-8)
+        freqs_p, psd_p = welch(pupil_clean - np.mean(pupil_clean), fs=fs_pupil, nperseg=min(64, len(pupil_clean)))
+        lfo_idx = np.where((freqs_p >= 0.1) & (freqs_p <= 0.5))[0]
+        lfo_power = float(np.sum(psd_p[lfo_idx])) if len(lfo_idx) > 0 else 0.0
+    else:
+        lfo_power = 0.0
+
     return {
         "pupil_trend_slope": float(slope),
         "pupil_variability_cv": float(cv),
         "pupil_dilation_episodes": int(dilation_episodes),
-        "pupil_constriction_episodes": int(constriction_episodes)
+        "pupil_constriction_episodes": int(constriction_episodes),
+        "pupil_lfo_power": float(lfo_power)
     }
 
 
@@ -221,10 +232,25 @@ def extract_eye_features(eye_df: pd.DataFrame):
         pupillometry_feats = _pupillometry_features(pupil_data, t_pupil)
         feats.update(pupillometry_feats)
 
-    # --- blink rate (sources with a blink flag only) ---
+    # --- blink features (sources with a blink flag only) ---
     if "is_blink" in eye_df.columns:
-        t_end = float(eye_df["t"].iloc[-1]) if "t" in eye_df.columns else len(eye_df) / 60.0
-        feats["blink_rate_hz"] = float(eye_df["is_blink"].sum() / (t_end + 1e-8))
+        t_arr = eye_df["t"].to_numpy(float) if "t" in eye_df.columns else np.arange(len(eye_df)) / 60.0
+        t_end = float(t_arr[-1]) if len(t_arr) > 0 else 4.0
+        blink_arr = eye_df["is_blink"].astype(int).to_numpy()
+        feats["blink_rate_hz"] = float(blink_arr.sum() / (t_end + 1e-8))
+
+        # Kinematic duration metrics
+        diff = np.diff(np.pad(blink_arr, (1, 1), 'constant'))
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        feats["blink_event_count"] = int(len(starts))
+        if len(starts) > 0 and len(ends) >= len(starts):
+            durations_s = t_arr[np.minimum(ends[:len(starts)], len(t_arr) - 1)] - t_arr[np.minimum(starts, len(t_arr) - 1)]
+            feats["blink_duration_mean_ms"] = float(np.mean(durations_s) * 1000.0)
+            feats["blink_duration_std_ms"] = float(np.std(durations_s) * 1000.0)
+        else:
+            feats["blink_duration_mean_ms"] = 0.0
+            feats["blink_duration_std_ms"] = 0.0
 
     # --- fixation ratio from the flag column if present ---
     if "is_fixation" in eye_df.columns:

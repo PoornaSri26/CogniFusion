@@ -239,6 +239,8 @@ def run(eeg_source="synthetic", eye_source="synthetic", n_cycles=None,
     raw_eye_window = deque(maxlen=CALIB_WINDOW)
     cycle = 0
     sustained_high_count = 0
+    smoothed_probs = None
+    ema_alpha = 0.65  # Temporal smoothing weight across consecutive epochs
     print("Real-time pipeline started. Ctrl+C to stop.")
     print(f"Model: {model_path} | ensemble folds: {len(folds)} | "
           f"calibration window: {CALIB_WINDOW} epochs")
@@ -299,10 +301,17 @@ def run(eeg_source="synthetic", eye_source="synthetic", n_cycles=None,
                                               torch.tensor(ye, dtype=torch.float32),
                                               return_weight=True)
                     prob_sum += torch.softmax(logits, dim=1).numpy()[0]
-                    w_sum += float(w.item())
+                    w_val = w.mean().item() if hasattr(w, "mean") else w.item()
+                    w_sum += float(w_val)
             probs = prob_sum / len(folds)
+            # EMA temporal smoothing over consecutive epochs to filter transient noise
+            if smoothed_probs is None:
+                smoothed_probs = probs
+            else:
+                smoothed_probs = ema_alpha * probs + (1.0 - ema_alpha) * smoothed_probs
+
             trust = w_sum / len(folds)
-            pred_idx = int(probs.argmax())
+            pred_idx = int(smoothed_probs.argmax())
             
             # Calculate processing time
             processing_time = time.time() - epoch_start_time

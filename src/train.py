@@ -117,9 +117,27 @@ def adaptive_subject_norm(values: pd.DataFrame, keys: pd.Series):
 
 
 # ------------------------------------------------------------------- training
+class FocalLoss(nn.Module):
+    """Focal Loss with class-weighting to combat hard-to-distinguish class boundaries."""
+    def __init__(self, weight=None, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.weight = weight
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1.0 - pt) ** self.gamma) * ce_loss
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        return focal_loss.sum()
+
+
 def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                epochs=200, lr=1e-3, weight_decay=5e-4, aux_weight=0.3,
-               modality_dropout=0.2, embed_dim=24, seed=42, verbose=True):
+               modality_dropout=0.2, embed_dim=24, use_focal=True, focal_gamma=2.0,
+               ema_eval=True, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -148,11 +166,15 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
 
     counts = torch.bincount(y_tr, minlength=len(LABELS)).float()
     class_weights = counts.sum() / (len(counts) * counts.clamp(min=1))
-    loss_main = nn.CrossEntropyLoss(weight=class_weights)
-    loss_aux = nn.CrossEntropyLoss(weight=class_weights)
+    if use_focal:
+        loss_main = FocalLoss(weight=class_weights, gamma=focal_gamma)
+        loss_aux = FocalLoss(weight=class_weights, gamma=focal_gamma)
+    else:
+        loss_main = nn.CrossEntropyLoss(weight=class_weights)
+        loss_aux = nn.CrossEntropyLoss(weight=class_weights)
 
     model = AttentionFusionNet(eeg_dim=len(eeg_cols), eye_dim=len(eye_cols),
-                               embed_dim=embed_dim, n_classes=len(LABELS))
+                               embed_dim=embed_dim, n_classes=len(LABELS), gate_type="vector")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
@@ -172,21 +194,32 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     model.eval()
     with torch.no_grad():
         logits_te, w_te = model(eeg_te, eye_te, return_weight=True)
-        probs = torch.softmax(logits_te, dim=1).numpy()
+        raw_probs = torch.softmax(logits_te, dim=1).numpy()
+        if ema_eval and len(raw_probs) > 1:
+            smoothed = np.zeros_like(raw_probs)
+            smoothed[0] = raw_probs[0]
+            alpha_ema = 0.65
+            for t in range(1, len(raw_probs)):
+                smoothed[t] = alpha_ema * raw_probs[t] + (1.0 - alpha_ema) * smoothed[t - 1]
+            probs = smoothed
+        else:
+            probs = raw_probs
         preds = probs.argmax(1)
     y_true = y_te.numpy()
 
     macro_f1 = f1_score(y_true, preds, average="macro")
+    acc = np.mean(preds == y_true)
     if verbose:
         print(classification_report(y_true, preds, target_names=le.classes_, digits=3))
         print("Confusion matrix:\n", confusion_matrix(y_true, preds))
-        print(f"    macro-F1 {macro_f1:.3f} | mean EEG-trust {w_te.mean().item():.3f}")
+        print(f"    accuracy {acc:.3f} | macro-F1 {macro_f1:.3f} | mean EEG-trust {w_te.mean().item():.3f}")
 
     fold_record = {
         "model_state": {k: v.cpu() for k, v in model.state_dict().items()},
         "scaler_eeg": scaler_eeg,
         "scaler_eye": scaler_eye,
         "val_macro_f1": float(macro_f1),
+        "val_accuracy": float(acc),
     }
     return fold_record, macro_f1
 
@@ -204,7 +237,8 @@ def population_robust_stats(values: pd.DataFrame):
 
 def main(features_path="data/processed/features.parquet", epochs=200, lr=1e-3,
          weight_decay=5e-4, aux_weight=0.3, modality_dropout=0.2, cv=0,
-         test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         test_frac=0.25, use_focal=True, focal_gamma=2.0, ema_eval=True,
+         out_prefix="models/fusion_model", seed=42):
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
     eye_cols = [c for c in df.columns if c.startswith("eye__")]
@@ -215,6 +249,7 @@ def main(features_path="data/processed/features.parquet", epochs=200, lr=1e-3,
     le = LabelEncoder().fit(df["label"])
     print(f"Features: {len(eeg_cols)} EEG + {len(eye_cols)} eye | epochs: {len(df)} | "
           f"subjects: {df['subject'].nunique()}")
+    print(f"Enhancements active: Vector-Gated Fusion, Focal Loss (gamma={focal_gamma}), Temporal EMA Smoothing={ema_eval}")
     print(df["label"].value_counts().to_string())
 
     if cv and cv > 1:
@@ -233,6 +268,7 @@ def main(features_path="data/processed/features.parquet", epochs=200, lr=1e-3,
             train_df, test_df, eeg_cols, eye_cols, le,
             epochs=epochs, lr=lr, weight_decay=weight_decay,
             aux_weight=aux_weight, modality_dropout=modality_dropout,
+            use_focal=use_focal, focal_gamma=focal_gamma, ema_eval=ema_eval,
             seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
@@ -246,6 +282,7 @@ def main(features_path="data/processed/features.parquet", epochs=200, lr=1e-3,
     torch.save({
         "version": 2,
         "model_class": "AttentionFusionNet",
+        "gate_type": "vector",
         "eeg_cols": eeg_cols,
         "eye_cols": eye_cols,
         "label_classes": list(le.classes_),
@@ -264,13 +301,20 @@ def main(features_path="data/processed/features.parquet", epochs=200, lr=1e-3,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train AttentionFusionNet v2")
+    parser = argparse.ArgumentParser(description="Train AttentionFusionNet v2 with High Accuracy Enhancements")
     parser.add_argument("--features", default="data/processed/features.parquet")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--aux-weight", type=float, default=0.3)
     parser.add_argument("--modality-dropout", type=float, default=0.2)
+    parser.add_argument("--focal-loss", dest="use_focal", action="store_true", default=True,
+                        help="Use Focal Loss for hard boundary discrimination")
+    parser.add_argument("--no-focal-loss", dest="use_focal", action="store_false")
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--ema-eval", dest="ema_eval", action="store_true", default=True,
+                        help="Evaluate with sequence EMA temporal smoothing")
+    parser.add_argument("--no-ema-eval", dest="ema_eval", action="store_false")
     parser.add_argument("--cv", type=int, default=0,
                         help="K-fold subject-wise CV (0 = single holdout split)")
     parser.add_argument("--test-frac", type=float, default=0.25)
@@ -279,5 +323,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(features_path=args.features, epochs=args.epochs, lr=args.lr,
          weight_decay=args.weight_decay, aux_weight=args.aux_weight,
-         modality_dropout=args.modality_dropout, cv=args.cv,
-         test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed)
+         modality_dropout=args.modality_dropout, use_focal=args.use_focal,
+         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval,
+         cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed)

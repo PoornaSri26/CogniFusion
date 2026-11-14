@@ -37,17 +37,20 @@ class ModalityEncoder(nn.Module):
 
 class AttentionFusionNet(nn.Module):
     def __init__(self, eeg_dim, eye_dim, embed_dim=24, n_classes=3,
-                 aux_heads=True):
+                 aux_heads=True, gate_type="vector"):
         super().__init__()
+        self.embed_dim = embed_dim
+        self.gate_type = gate_type
         self.eeg_enc = ModalityEncoder(eeg_dim, out_dim=embed_dim)
         self.eye_enc = ModalityEncoder(eye_dim, out_dim=embed_dim)
 
-        # gate input: both embeddings + their per-feature means/stds (6 extra)
+        # gate input: both embeddings + their per-feature means/stds (4 extra)
         gate_in = embed_dim * 2 + 4
+        gate_out = embed_dim if gate_type == "vector" else 1
         self.gate = nn.Sequential(
             nn.Linear(gate_in, 32), nn.GELU(),
             nn.Linear(32, 16), nn.GELU(),
-            nn.Linear(16, 1), nn.Sigmoid(),
+            nn.Linear(16, gate_out), nn.Sigmoid(),
         )
 
         # classifier sees fused vector + skip concat of both embeddings
@@ -80,16 +83,19 @@ class AttentionFusionNet(nn.Module):
             e_eye = e_eye * (~drop_eye).float()
 
         w = self.gate(torch.cat([e_eeg, e_eye, self._moments(e_eeg), self._moments(e_eye)], dim=1))
-        fused = w * e_eeg + (1 - w) * e_eye
+        fused = w * e_eeg + (1.0 - w) * e_eye
         logits = self.classifier(torch.cat([fused, e_eeg, e_eye], dim=1))
+
+        # Scalar trust weight for logging/backward-compat
+        w_summary = w.mean(dim=1, keepdim=True) if self.gate_type == "vector" else w
 
         if self.training and self.aux_heads:
             aux = (self.eeg_head(e_eeg), self.eye_head(e_eye))
             if return_weight:
-                return logits, w, aux
+                return logits, w_summary, aux
             return logits, aux
         if return_weight:
-            return logits, w
+            return logits, w_summary
         return logits
 
 

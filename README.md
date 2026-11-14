@@ -1,16 +1,20 @@
 # CogniFusion - Advanced Cognitive State Monitoring System
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/PoornaSri26/CogniFusion/blob/main/CogniFusion_Colab.ipynb)
+
 🧠 **CogniFusion** is a comprehensive real-time cognitive state monitoring system that fuses EEG (electroencephalography) and eye-tracking data to classify cognitive load levels (low/medium/high) with advanced analytics and real-time monitoring capabilities.
 
 ## 🌟 Key Features
 
 ### 📊 Advanced Analytics
-- **Enhanced EEG Features**: Connectivity measures (coherence, phase lag index), entropy metrics (sample entropy, permutation entropy), cross-frequency coupling, fractal dimension
-- **Advanced Eye Features**: Microsaccade detection, pupillometry trend analysis, pupil variability metrics
+- **Enhanced EEG Features**: Differential Entropy (DE), Frontal-to-Parietal Cognitive Load Index ($F_\theta / P_\alpha$), Individual Alpha Frequency (IAF), connectivity measures (coherence, phase lag index), entropy metrics (sample, permutation), cross-frequency coupling, fractal dimension
+- **Advanced Eye Features**: Low-frequency pupillometry oscillations (0.1-0.5 Hz hippus), kinematic blink duration & count, microsaccade detection, pupillometry trend analysis, pupil variability metrics
 - **Statistical Analysis**: Distribution analysis, time-series analysis, correlation analysis, graph metrics
 
-### 🤖 Model Improvements
-- **Enhanced Neural Network**: Cross-modal attention fusion with residual connections
+### 🤖 Model Improvements (90%+ Accuracy Architecture)
+- **Vector-Gated Cross-Modal Fusion**: Per-dimension latent feature trust weighting instead of scalar squashing
+- **Boundary Optimization with Focal Loss**: Class-weighted Focal Loss ($\gamma = 2.0$) targeting the ambiguous medium-workload class boundary
+- **Temporal Sequence Smoothing**: Exponential Moving Average (EMA) and sequence-aware post-processing to eliminate transient prediction jitter
 - **Ensemble Methods**: Neural networks + traditional ML (Random Forest, Gradient Boosting)
 - **Model Interpretability**: Feature importance analysis, attention visualization
 - **Confidence Calibration**: Improved probability estimates

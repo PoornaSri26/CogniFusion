@@ -171,8 +171,35 @@ def extract_eeg_features(eeg_epoch, fs=FS_EEG, channel_names=None):
         feats[f"{ch_name}_sample_entropy"] = _sample_entropy(sig)
         feats[f"{ch_name}_permutation_entropy"] = _permutation_entropy(sig)
         
+        # Differential entropy (DE) across all frequency bands
+        for b in BANDS:
+            feats[f"{ch_name}_{b}_diff_entropy"] = float(0.5 * np.log(2 * np.pi * np.e * (powers[b] + 1e-12)))
+
+        # Individual Alpha Frequency (IAF) peak in 7-13 Hz
+        freqs_welch, psd_welch = welch(sig, fs=fs, nperseg=min(256, len(sig)))
+        alpha_idx = np.where((freqs_welch >= 7.0) & (freqs_welch <= 13.0))[0]
+        if len(alpha_idx) > 0:
+            feats[f"{ch_name}_iaf_peak"] = float(freqs_welch[alpha_idx[np.argmax(psd_welch[alpha_idx])]])
+        else:
+            feats[f"{ch_name}_iaf_peak"] = 10.0
+
         # Fractal dimension
         feats[f"{ch_name}_fractal_dimension"] = _fractal_dimension(sig)
+
+    # Cross-regional Cognitive Load Index (Frontal Theta / Parietal Alpha)
+    frontal_chs = [ch for ch in channel_names if any(k in ch.upper() for k in ["AF", "FP", "F3", "F4", "FZ"])]
+    parietal_chs = [ch for ch in channel_names if any(k in ch.upper() for k in ["TP", "P3", "P4", "PZ", "O1", "O2"])]
+    if not frontal_chs and len(channel_names) >= 4:
+        frontal_chs = channel_names[:2]
+        parietal_chs = channel_names[2:4]
+
+    if frontal_chs and parietal_chs:
+        f_theta = float(np.mean([per_ch_powers[ch]["theta"] for ch in frontal_chs]))
+        f_beta = float(np.mean([per_ch_powers[ch]["beta"] for ch in frontal_chs]))
+        p_alpha = float(np.mean([per_ch_powers[ch]["alpha"] for ch in parietal_chs]))
+        feats["cli_frontal_theta_parietal_alpha"] = float((f_theta + 1e-8) / (p_alpha + 1e-8))
+        feats["cli_frontal_beta_parietal_alpha"] = float((f_beta + 1e-8) / (p_alpha + 1e-8))
+        feats["cli_frontal_tb_parietal_alpha"] = float((f_theta + f_beta + 1e-8) / (p_alpha + 1e-8))
 
     # Hemispheric asymmetry: log-power(left) - log-power(right), per band.
     name_set = set(channel_names)
