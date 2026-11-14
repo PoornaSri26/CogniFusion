@@ -71,51 +71,67 @@ def project_path(path):
 
 
 def load_model(model_path="models/fusion_model.pt"):
-    """Load the self-contained ensemble checkpoint (v2). Falls back to the
+    """Load a self-contained ensemble checkpoint (v2 or v3). Falls back to
     legacy v1 layout (separate scalers.pkl) for old checkpoints."""
     model_path = project_path(model_path)
     if not model_path.exists():
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
     ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    version = ckpt.get("version", 1)
 
-    if ckpt.get("version") == 2:
+    if version in (2, 3):
+        embed_dim = ckpt.get("embed_dim", 24)
+        gate_type = ckpt.get("gate_type", "vector" if version == 3 else "scalar")
         folds = []
         for rec in ckpt["folds"]:
-            model = AttentionFusionNet(eeg_dim=len(ckpt["eeg_cols"]),
-                                       eye_dim=len(ckpt["eye_cols"]),
-                                       embed_dim=ckpt.get("embed_dim", 24),
-                                       n_classes=len(ckpt["label_classes"]))
+            rec_embed = rec.get("embed_dim", embed_dim)
+            model = AttentionFusionNet(
+                eeg_dim=len(ckpt["eeg_cols"]),
+                eye_dim=len(ckpt["eye_cols"]),
+                embed_dim=rec_embed,
+                n_classes=len(ckpt["label_classes"]),
+                gate_type=gate_type,
+            )
             model.load_state_dict(rec["model_state"])
             model.eval()
-            folds.append({"model": model, "scaler_eeg": rec["scaler_eeg"],
-                          "scaler_eye": rec["scaler_eye"]})
+            fold_entry = {
+                "model":      model,
+                "scaler_eeg": rec["scaler_eeg"],
+                "scaler_eye": rec["scaler_eye"],
+                "lgb_model":  rec.get("lgb_model"),   # None if GBM not trained
+            }
+            folds.append(fold_entry)
+        cv = ckpt.get("cv_summary", {})
+        if cv:
+            print(f"[Model v{version}] loaded — "
+                  f"mean accuracy={cv.get('mean_accuracy', '?'):.3f}, "
+                  f"mean macro-F1={cv.get('mean_macro_f1', '?'):.3f}, "
+                  f"folds={len(folds)}, embed_dim={embed_dim}")
         return {"folds": folds, "eeg_cols": ckpt["eeg_cols"],
                 "eye_cols": ckpt["eye_cols"], "label_classes": ckpt["label_classes"],
-                "legacy": False}
+                "legacy": False, "version": version}
 
-    # Fallback for v1 models - try to load anyway with default dimensions
+    # Fallback for v1 models
     try:
-        print(f"Loading legacy model from {model_path}")
+        print(f"Loading legacy v1 model from {model_path}")
         model = AttentionFusionNet(eeg_dim=78, eye_dim=18, embed_dim=24, n_classes=3)
         model.load_state_dict(ckpt)
         model.eval()
-        
-        # Create dummy scalers
         from sklearn.preprocessing import StandardScaler
-        scaler_eeg = StandardScaler()
-        scaler_eye = StandardScaler()
-        
         return {
-            "folds": [{"model": model, "scaler_eeg": scaler_eeg, "scaler_eye": scaler_eye}],
+            "folds": [{"model": model,
+                       "scaler_eeg": StandardScaler(),
+                       "scaler_eye": StandardScaler(),
+                       "lgb_model":  None}],
             "eeg_cols": [f"eeg__{k}" for k in range(78)],
-            "eye_cols": [f"eye__{k}" for k in range(18)],
+            "eye_cols":  [f"eye__{k}" for k in range(18)],
             "label_classes": ["low", "medium", "high"],
-            "legacy": True
+            "legacy": True, "version": 1,
         }
     except Exception as e:
         raise ValueError(
             f"Failed to load model from {model_path}: {e}. "
-            f"Please ensure the model file exists and is compatible.")
+            "Please ensure the model file exists and is compatible.")
 
 
 def history_record(record):
@@ -300,7 +316,14 @@ def run(eeg_source="synthetic", eye_source="synthetic", n_cycles=None,
                     logits, w = fold["model"](torch.tensor(xe, dtype=torch.float32),
                                               torch.tensor(ye, dtype=torch.float32),
                                               return_weight=True)
-                    prob_sum += torch.softmax(logits, dim=1).numpy()[0]
+                    nn_probs = torch.softmax(logits, dim=1).numpy()[0]
+                    # Stack LightGBM if present in this fold (v3 checkpoint)
+                    lgb_model = fold.get("lgb_model")
+                    if lgb_model is not None:
+                        x_all = np.concatenate([xe, ye], axis=1)
+                        lgb_probs = lgb_model.predict_proba(x_all)[0]
+                        nn_probs = 0.60 * nn_probs + 0.40 * lgb_probs
+                    prob_sum += nn_probs
                     w_val = w.mean().item() if hasattr(w, "mean") else w.item()
                     w_sum += float(w_val)
             probs = prob_sum / len(folds)
