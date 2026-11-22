@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile-check all Python sources
+        run: python -m compileall -q src data dashboard.py
+
+      - name: Install light deps
+        run: pip install -q numpy pandas scipy scikit-learn pyarrow joblib
+
+      - name: Import smoke test (non-hardware modules)
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "src")
+          import eeg_features, eye_features, advanced_analytics
+          import realtime_features, data_management, dashboard_enhancements
+          import model_improvements, testing_framework
+          print("all non-hardware modules import cleanly")
+          PY
