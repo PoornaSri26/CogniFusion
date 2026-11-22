@@ -33,18 +33,13 @@ ENV/
 *.swo
 *~
 
-# Data files (large datasets)
-data/raw/*.csv
-data/raw/*.npy
-data/raw/*.npz
-data/processed/*.parquet
-data/processed/*.csv
+# Data files (generated / large datasets — regenerate via data/simulate_data.py)
+data/raw/
+data/tmp/
+data/processed/
 
-# Model files (large models)
-models/*.pt
-models/*.pth
-models/*.pkl
-models/*.h5
+# Model files
+models/
 
 # Logs
 logs/
@@ -60,6 +55,7 @@ sessions/
 exports/
 benchmarks/
 test_data/
+dashboard_state.json
 
 # OS
 .DS_Store
@@ -68,7 +64,6 @@ desktop.ini
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
 
 # Streamlit
 .streamlit/
