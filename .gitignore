@@ -36,7 +36,9 @@ ENV/
 # Data files (generated / large datasets — regenerate via data/simulate_data.py)
 data/raw/
 data/tmp/
+# data/processed/  (features.parquet is committed as a prebuilt demo dataset)
 data/processed/
+!data/processed/features.parquet
 
 # Model files
 models/
