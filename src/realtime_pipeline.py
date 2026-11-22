@@ -35,6 +35,7 @@ both streams are synthetic, only the fusion model + feature pipeline are real.
 import sys
 import json
 import time
+import warnings
 import argparse
 from collections import deque
 from pathlib import Path
@@ -321,7 +322,9 @@ def run(eeg_source="synthetic", eye_source="synthetic", n_cycles=None,
                     lgb_model = fold.get("lgb_model")
                     if lgb_model is not None:
                         x_all = np.concatenate([xe, ye], axis=1)
-                        lgb_probs = lgb_model.predict_proba(x_all)[0]
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            lgb_probs = lgb_model.predict_proba(x_all)[0]
                         nn_probs = 0.60 * nn_probs + 0.40 * lgb_probs
                     prob_sum += nn_probs
                     w_val = w.mean().item() if hasattr(w, "mean") else w.item()
