@@ -220,6 +220,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
 
     best_val_f1 = 0.0
     best_state  = None
+    history = []
 
     for epoch in range(epochs):
         model.train()
@@ -244,6 +245,9 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                 lte, _ = model(eeg_te_t, eye_te_t, return_weight=True)
                 val_preds = lte.argmax(1).numpy()
             val_f1 = f1_score(y_te_np, val_preds, average="macro")
+            history.append({"epoch": epoch + 1,
+                            "loss": float(ep_loss / max(len(loader), 1)),
+                            "val_f1": float(val_f1)})
             if val_f1 > best_val_f1:
                 best_val_f1 = val_f1
                 best_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -316,6 +320,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "scaler_eye":      scaler_eye,
         "val_macro_f1":    float(macro_f1),
         "val_accuracy":    float(acc),
+        "history":         history,
         "embed_dim":       embed_dim,
     }
     return fold_record, macro_f1
