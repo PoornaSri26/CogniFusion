@@ -45,6 +45,12 @@ The notebook runs the full pipeline end-to-end: synthetic data generation →
 feature extraction → 5-fold training → per-model evaluation. Pick a **GPU**
 runtime for reasonable speed.
 
+**Prebuilt artifacts are committed**, so you can skip the slow steps entirely:
+`data/processed/features.parquet` (360 fused epochs) and
+`models/fusion_model.pt` (3-fold NN+LightGBM ensemble, 99.7% subject-wise CV).
+Jump straight to evaluation — or run section 7 to retrain. Section 10 downloads
+the real 113-participant dataset from Zenodo and trains on it.
+
 ### Installation
 ```bash
 pip install -r requirements.txt
