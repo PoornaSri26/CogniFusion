@@ -188,7 +188,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
                ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, swa=False,
-               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, gce_q=0.0, sam_rho=0.0, seed=42, verbose=True):
+               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, gce_q=0.0, sam_rho=0.0, rdrop=0.0, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -363,6 +363,12 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                     torch.log_softmax(logits / kd_temp, dim=1), tp_b,
                     reduction="batchmean") * (kd_temp ** 2)
                 loss = loss + kd_alpha * kd_loss
+            if rdrop > 0 and not (sam_rho > 0):
+                # R-Drop: second stochastic forward, KL consistency between the two
+                logits_b, aux_b = model(eeg_m, eye_m, **kw)
+                p1 = torch.log_softmax(logits / 1.0, dim=1)
+                p2 = torch.log_softmax(logits_b / 1.0, dim=1)
+                loss = loss + rdrop * F.kl_div(p1, p2.exp(), reduction="batchmean")
             if sam_rho > 0:
                 # SAM: (1) ascent to adversarial weights, (2) restore, (3) descent
                 loss.backward()
@@ -544,7 +550,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "feat_dropout":     feat_dropout,
         "ema_decay":        ema_decay,
         "cutmix":           cutmix,
-        "gce_q":            gce_q, "sam_rho": sam_rho,
+        "gce_q":            gce_q, "sam_rho": sam_rho, "rdrop": rdrop,
     }
     return fold_record, macro_f1
 
@@ -565,7 +571,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          seq_len=1, ablate=None, grl=False,
          grl_lambda=1.0, grl_weight=0.1,
          swa=False, teacher_path=None, kd_alpha=0.7,
-         kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, gce_q=0.0, sam_rho=0.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, gce_q=0.0, sam_rho=0.0, rdrop=0.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -606,7 +612,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
             use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, grl=grl,
             grl_lambda=grl_lambda, grl_weight=grl_weight, swa=swa, teacher_path=teacher_path, kd_alpha=kd_alpha,
-            kd_temp=kd_temp, feat_noise=feat_noise, feat_dropout=feat_dropout, ema_decay=ema_decay, cutmix=cutmix, gce_q=gce_q, sam_rho=sam_rho, seed=seed + i)
+            kd_temp=kd_temp, feat_noise=feat_noise, feat_dropout=feat_dropout, ema_decay=ema_decay, cutmix=cutmix, gce_q=gce_q, sam_rho=sam_rho, rdrop=rdrop, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -676,6 +682,8 @@ if __name__ == "__main__":
     parser.add_argument("--kd-temp",      type=float, default=2.0)
     parser.add_argument("--gce-q",        type=float, default=0.0,
                         help="Generalized CE q for noisy labels (0=off, e.g. 0.7)")
+    parser.add_argument("--rdrop",        type=float, default=0.0,
+                        help="R-Drop consistency weight (0 disables, e.g. 1.0)")
     parser.add_argument("--sam-rho",      type=float, default=0.0,
                         help="SAM perturbation radius (0=off, e.g. 0.05)")
     parser.add_argument("--cutmix",       type=float, default=0.0,
@@ -706,5 +714,5 @@ if __name__ == "__main__":
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
         seq_len=args.seq_len, ablate=args.ablate, grl=args.grl,
         grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, swa=args.swa, teacher_path=args.teacher, kd_alpha=args.kd_alpha,
-        kd_temp=args.kd_temp, feat_noise=args.feat_noise, feat_dropout=args.feat_dropout, ema_decay=args.ema_decay, cutmix=args.cutmix, gce_q=args.gce_q, sam_rho=args.sam_rho, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        kd_temp=args.kd_temp, feat_noise=args.feat_noise, feat_dropout=args.feat_dropout, ema_decay=args.ema_decay, cutmix=args.cutmix, gce_q=args.gce_q, sam_rho=args.sam_rho, rdrop=args.rdrop, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )
