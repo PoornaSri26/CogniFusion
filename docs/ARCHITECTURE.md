@@ -7,6 +7,10 @@
 - `src/train.py`: subject-wise splits, adaptive_subject_norm, scalers, focal/GCE loss, mixup/cutmix/noise/dropout aug, SWA/EMA candidates, temperature scaling, optional LightGBM stacking -> self-contained checkpoint (folds + scalers + temp + label_classes)
 - `src/realtime_pipeline.py`: checkpoint loader -> per-epoch preprocess/scale/predict -> EMA smoothing -> DataLogger + SessionManager
 - `src/data_management.py`: DataLogger (SQLite), SessionManager (JSON), analytics helpers
+- `src/advanced_analytics.py`, `src/dashboard_enhancements.py`, `src/testing_framework.py`: analytics, dashboard widgets, self-test harness
+- `src/eeg_stream.py`, `src/webcam_eyetracker.py`, `src/realtime_features.py`: hardware/streaming adapters (BrainFlow EEG, MediaPipe gaze)
+- `src/model_improvements.py`: extended model utilities
+- `data/simulate_data.py`: synthetic epoch generator; `src/build_dataset.py`: feature table builder; `src/build_dataset_real.py`: Zenodo CSV -> features_real.parquet
 - `dashboard.py`: Streamlit UI reading logs.db + dashboard_state.json
 - `CogniFusion_Colab.ipynb`: end-to-end research notebook
 
