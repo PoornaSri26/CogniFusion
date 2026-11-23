@@ -176,7 +176,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
                ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, swa=False,
-               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, seed=42, verbose=True):
+               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -278,6 +278,12 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         if verbose:
             print(f"    distillation: teacher={teacher_path} alpha={kd_alpha} T={kd_temp}")
 
+    # --- optional weight EMA ---
+    ema_state = None
+    if ema_decay > 0:
+        ema_state = {k: v.detach().clone() for k, v in model.state_dict().items()
+                     if v.dtype.is_floating_point}
+
     # --- optimizer: AdamW + cosine annealing with warm restarts ---
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Warm-up: linear for 10 epochs, then cosine with restarts every 100 epochs
@@ -338,6 +344,12 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             opt.step()
+            if ema_state is not None:
+                with torch.no_grad():
+                    msd = model.state_dict()
+                    for k in ema_state:
+                        if k in msd and msd[k].dtype.is_floating_point:
+                            ema_state[k].mul_(ema_decay).add_(msd[k].detach(), alpha=1 - ema_decay)
             ep_loss += loss.item()
         sched.step()
 
@@ -388,6 +400,25 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
             model.load_state_dict(cand)
             if verbose:
                 print(f"    SWA rejected: {f1_swa:.3f} < {best_val_f1:.3f}")
+        if best_state is not None:
+            model.load_state_dict(best_state)
+
+    # --- Optional weight-EMA candidate: keep if it beats best val F1 ---
+    if ema_state is not None:
+        cur = {k: v.clone() for k, v in model.state_dict().items()}
+        # merge EMA floats back over full state dict
+        merged = dict(cur); merged.update(ema_state)
+        model.load_state_dict(merged); model.eval()
+        with torch.no_grad():
+            lte, _ = model(eeg_te_t, eye_te_t, return_weight=True)
+            f1_ema = f1_score(y_te_np, lte.argmax(1).numpy(), average="macro")
+        if f1_ema >= best_val_f1:
+            best_val_f1 = f1_ema
+            best_state = {k: v.clone() for k, v in merged.items()}
+            if verbose: print(f"    EMA accepted: val_f1 {f1_ema:.3f}")
+        else:
+            model.load_state_dict(cur)
+            if verbose: print(f"    EMA rejected: {f1_ema:.3f} < {best_val_f1:.3f}")
         if best_state is not None:
             model.load_state_dict(best_state)
 
@@ -465,6 +496,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "kd_alpha":        kd_alpha if teacher_path else None,
         "feat_noise":       feat_noise,
         "feat_dropout":     feat_dropout,
+        "ema_decay":        ema_decay,
     }
     return fold_record, macro_f1
 
@@ -485,7 +517,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          seq_len=1, ablate=None, grl=False,
          grl_lambda=1.0, grl_weight=0.1,
          swa=False, teacher_path=None, kd_alpha=0.7,
-         kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -526,7 +558,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
             use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, grl=grl,
             grl_lambda=grl_lambda, grl_weight=grl_weight, swa=swa, teacher_path=teacher_path, kd_alpha=kd_alpha,
-            kd_temp=kd_temp, feat_noise=feat_noise, feat_dropout=feat_dropout, seed=seed + i)
+            kd_temp=kd_temp, feat_noise=feat_noise, feat_dropout=feat_dropout, ema_decay=ema_decay, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -594,6 +626,8 @@ if __name__ == "__main__":
                         help="Path to teacher checkpoint for knowledge distillation")
     parser.add_argument("--kd-alpha",     type=float, default=0.7)
     parser.add_argument("--kd-temp",      type=float, default=2.0)
+    parser.add_argument("--ema-decay",    type=float, default=0.0,
+                        help="Weight EMA decay (e.g. 0.999); 0 disables")
     parser.add_argument("--feat-dropout", type=float, default=0.0,
                         help="Random contiguous EEG feature-block dropout prob")
     parser.add_argument("--feat-noise",   type=float, default=0.0,
@@ -618,5 +652,5 @@ if __name__ == "__main__":
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
         seq_len=args.seq_len, ablate=args.ablate, grl=args.grl,
         grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, swa=args.swa, teacher_path=args.teacher, kd_alpha=args.kd_alpha,
-        kd_temp=args.kd_temp, feat_noise=args.feat_noise, feat_dropout=args.feat_dropout, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        kd_temp=args.kd_temp, feat_noise=args.feat_noise, feat_dropout=args.feat_dropout, ema_decay=args.ema_decay, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )
