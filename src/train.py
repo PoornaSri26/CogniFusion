@@ -176,7 +176,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
                ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, swa=False,
-               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, seed=42, verbose=True):
+               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -324,6 +324,13 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
             if feat_noise > 0:
                 eeg_m = eeg_m + torch.randn_like(eeg_m) * feat_noise
                 eye_m = eye_m + torch.randn_like(eye_m) * feat_noise
+            if cutmix > 0 and eeg_b.dim() == 2:
+                n_f = eeg_b.shape[1]
+                blk = max(1, int(n_f * cutmix))
+                s = int(torch.randint(0, n_f - blk + 1, (1,)))
+                perm = torch.randperm(eeg_b.shape[0], device=eeg_b.device)
+                eeg_b[:, s:s+blk] = eeg_b[perm][:, s:s+blk]
+                eye_b[:, :min(blk, eye_b.shape[1])] = eye_b[perm][:, :min(blk, eye_b.shape[1])]
             if feat_dropout > 0 and eeg_m.dim() == 2:
                 # randomly zero a contiguous block of EEG feature dims per sample
                 n_f = eeg_m.shape[1]; blk = max(1, int(n_f * feat_dropout))
@@ -497,6 +504,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "feat_noise":       feat_noise,
         "feat_dropout":     feat_dropout,
         "ema_decay":        ema_decay,
+        "cutmix":           cutmix,
     }
     return fold_record, macro_f1
 
@@ -517,7 +525,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          seq_len=1, ablate=None, grl=False,
          grl_lambda=1.0, grl_weight=0.1,
          swa=False, teacher_path=None, kd_alpha=0.7,
-         kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -558,7 +566,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
             use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, grl=grl,
             grl_lambda=grl_lambda, grl_weight=grl_weight, swa=swa, teacher_path=teacher_path, kd_alpha=kd_alpha,
-            kd_temp=kd_temp, feat_noise=feat_noise, feat_dropout=feat_dropout, ema_decay=ema_decay, seed=seed + i)
+            kd_temp=kd_temp, feat_noise=feat_noise, feat_dropout=feat_dropout, ema_decay=ema_decay, cutmix=cutmix, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -626,6 +634,8 @@ if __name__ == "__main__":
                         help="Path to teacher checkpoint for knowledge distillation")
     parser.add_argument("--kd-alpha",     type=float, default=0.7)
     parser.add_argument("--kd-temp",      type=float, default=2.0)
+    parser.add_argument("--cutmix",       type=float, default=0.0,
+                        help="Feature-span CutMix fraction (0 disables)")
     parser.add_argument("--ema-decay",    type=float, default=0.0,
                         help="Weight EMA decay (e.g. 0.999); 0 disables")
     parser.add_argument("--feat-dropout", type=float, default=0.0,
@@ -652,5 +662,5 @@ if __name__ == "__main__":
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
         seq_len=args.seq_len, ablate=args.ablate, grl=args.grl,
         grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, swa=args.swa, teacher_path=args.teacher, kd_alpha=args.kd_alpha,
-        kd_temp=args.kd_temp, feat_noise=args.feat_noise, feat_dropout=args.feat_dropout, ema_decay=args.ema_decay, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        kd_temp=args.kd_temp, feat_noise=args.feat_noise, feat_dropout=args.feat_dropout, ema_decay=args.ema_decay, cutmix=args.cutmix, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )
