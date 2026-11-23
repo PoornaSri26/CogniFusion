@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
@@ -174,7 +175,8 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                epochs=300, lr=3e-4, weight_decay=1e-3, aux_weight=0.25,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
-               ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, swa=False, seed=42, verbose=True):
+               ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, swa=False,
+               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -251,6 +253,31 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         seq_len=seq_len, n_domains=n_domains,
     )
 
+    # --- optional knowledge distillation from a teacher checkpoint ---
+    teacher_probs = None
+    if teacher_path:
+        tck = torch.load(teacher_path, map_location="cpu", weights_only=False)
+        trec = tck["folds"][0]
+        from model import AttentionFusionNet as _AFN
+        teacher = _AFN(eeg_dim=len(eeg_cols), eye_dim=len(eye_cols),
+                       embed_dim=trec.get("embed_dim", embed_dim), n_classes=len(LABELS),
+                       gate_type=tck.get("gate_type", "vector"),
+                       seq_len=trec.get("seq_len", seq_len))
+        teacher.load_state_dict(trec["model_state"]); teacher.eval()
+        tsc = TemperatureScaler(); tsc.load_state_dict(trec["temp_scaler"]); tsc.eval()
+        with torch.no_grad():
+            # teacher sees per-epoch features: flatten windows back if needed
+            if eeg_tr_t.dim() == 3:
+                B,T,nF = eeg_tr_t.shape
+                te_in = eeg_tr_t.reshape(B*T, nF); ty_in = eye_tr_t.reshape(B*T, nF)
+                tl = tsc(teacher(te_in, ty_in))
+                tp = torch.softmax(tl / kd_temp, dim=1).view(B, T, -1)[:, -1]
+            else:
+                tp = torch.softmax(tsc(teacher(eeg_tr_t, eye_tr_t)) / kd_temp, dim=1)
+            teacher_probs = tp
+        if verbose:
+            print(f"    distillation: teacher={teacher_path} alpha={kd_alpha} T={kd_temp}")
+
     # --- optimizer: AdamW + cosine annealing with warm restarts ---
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Warm-up: linear for 10 epochs, then cosine with restarts every 100 epochs
@@ -259,7 +286,10 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     sched = torch.optim.lr_scheduler.SequentialLR(opt, [warmup_sched, cosine_sched], milestones=[10])
 
     # --- mini-batch DataLoader ---
-    if grl:
+    if teacher_probs is not None:
+        tp_t = teacher_probs if torch.is_tensor(teacher_probs) else torch.tensor(teacher_probs, dtype=torch.float32)
+        dataset = TensorDataset(eeg_tr_t, eye_tr_t, y_tr_t, tp_t)
+    elif grl:
         dataset = TensorDataset(eeg_tr_t, eye_tr_t, y_tr_t, s_tr_t)
     else:
         dataset = TensorDataset(eeg_tr_t, eye_tr_t, y_tr_t)
@@ -275,7 +305,9 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         model.train()
         ep_loss = 0.0
         for batch in loader:
-            if grl:
+            if teacher_probs is not None:
+                eeg_b, eye_b, y_b, tp_b = batch; s_b = None
+            elif grl:
                 eeg_b, eye_b, y_b, s_b = batch
             else:
                 eeg_b, eye_b, y_b = batch; s_b = None
@@ -289,8 +321,11 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
             logits, aux = model(eeg_m, eye_m, **kw)
             loss = mixup_loss(criterion_main, logits, y_a, y_b2, lam)
             loss = loss + aux_weight * (criterion_aux(aux[0], y_a) + criterion_aux(aux[1], y_a))
-            if grl and len(aux) > 2:
-                loss = loss + grl_weight * aux[2]
+            if teacher_probs is not None:
+                kd_loss = F.kl_div(
+                    torch.log_softmax(logits / kd_temp, dim=1), tp_b,
+                    reduction="batchmean") * (kd_temp ** 2)
+                loss = loss + kd_alpha * kd_loss
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             opt.step()
@@ -418,6 +453,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "ablate":          ablate,
         "grl":             grl,
         "swa":             swa,
+        "kd_alpha":        kd_alpha if teacher_path else None,
     }
     return fold_record, macro_f1
 
@@ -437,7 +473,8 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          use_focal=True, focal_gamma=2.0, ema_eval=True, use_gbm=False,
          seq_len=1, ablate=None, grl=False,
          grl_lambda=1.0, grl_weight=0.1,
-         swa=False, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         swa=False, teacher_path=None, kd_alpha=0.7,
+         kd_temp=2.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -477,7 +514,8 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             mixup_alpha=mixup_alpha, batch_size=batch_size,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
             use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, grl=grl,
-            grl_lambda=grl_lambda, grl_weight=grl_weight, swa=swa, seed=seed + i)
+            grl_lambda=grl_lambda, grl_weight=grl_weight, swa=swa, teacher_path=teacher_path, kd_alpha=kd_alpha,
+            kd_temp=kd_temp, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -541,6 +579,10 @@ if __name__ == "__main__":
                         help="Domain-adversarial subject invariance (GRL)")
     parser.add_argument("--grl-lambda",   type=float, default=1.0)
     parser.add_argument("--grl-weight",   type=float, default=0.1)
+    parser.add_argument("--teacher",      default=None,
+                        help="Path to teacher checkpoint for knowledge distillation")
+    parser.add_argument("--kd-alpha",     type=float, default=0.7)
+    parser.add_argument("--kd-temp",      type=float, default=2.0)
     parser.add_argument("--swa",          action="store_true",
                         help="Stochastic weight averaging over eval snapshots")
     parser.add_argument("--ablate",       choices=["eeg","eye"], default=None,
@@ -560,5 +602,6 @@ if __name__ == "__main__":
         label_smoothing=args.label_smoothing, use_focal=args.use_focal,
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
         seq_len=args.seq_len, ablate=args.ablate, grl=args.grl,
-        grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, swa=args.swa, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, swa=args.swa, teacher_path=args.teacher, kd_alpha=args.kd_alpha,
+        kd_temp=args.kd_temp, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )
