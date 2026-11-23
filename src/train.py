@@ -76,7 +76,7 @@ def coerce_numeric(df, columns):
 
 
 def adaptive_subject_norm(values: pd.DataFrame, keys: pd.Series):
-    values = values.copy()
+    values = values.copy().astype(float)
     stats = {}
     key_arr = keys.to_numpy()
     for key in pd.unique(key_arr):
@@ -506,7 +506,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                 num_leaves=63, min_child_samples=15,
                 subsample=0.8, colsample_bytree=0.6,
                 reg_alpha=0.1, reg_lambda=0.3,
-                class_weight='balanced', random_state=seed, n_jobs=-1
+                class_weight='balanced', random_state=seed, n_jobs=-1, verbose=-1
             )
             lgb_clf.fit(X_tr_all, y_tr_ep)
             lgb_probs = lgb_clf.predict_proba(X_te_all)
