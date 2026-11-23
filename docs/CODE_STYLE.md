@@ -19,3 +19,7 @@
 
 ## Verification before done
 `python -m compileall src data dashboard.py` + one short training run for train.py changes + notebook compile check for notebook changes.
+
+---
+## For AI agents
+Follow these conventions. Run compile checks before finishing. No dead code, no commented experiments, no `!`-line continuations in notebook cells.

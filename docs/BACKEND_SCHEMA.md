@@ -17,3 +17,7 @@ sessions 1-N epochs; sessions 1-N alerts; epochs/alerts reference session_id.
 - All writes via DataLogger/SessionManager APIs - never raw SQL elsewhere
 - probabilities stored as JSON arrays aligned to `label_classes`
 - No user PII beyond optional user_id; raw signals never persisted (features only)
+
+---
+## For AI agents
+Generate DB access only through DataLogger/SessionManager. Never raw SQL elsewhere. Keep checkpoint format and JSON session schema backward compatible.

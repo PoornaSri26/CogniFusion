@@ -18,3 +18,7 @@ raw epoch -> band-power/gaze features -> adaptive subject norm -> StandardScaler
 - GBM stays per-epoch even when NN uses seq windows (blend guarded)
 - All splits group by subject - no leakage
 - Third-party calls: none at inference; dataset download only in notebook
+
+---
+## For AI agents
+Put new code in the layer matching its job. Keep the checkpoint self-contained and the non-seq inference path backward compatible. Update this doc when structure changes.

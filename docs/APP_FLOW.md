@@ -19,3 +19,7 @@ Setup -> Data (prebuilt parquet skip) -> Features (skip if exists) -> EDA -> Tra
 - Missing modality at runtime -> pipeline requires both; document failure mode
 - Subject drift -> adaptive_subject_norm per session
 - Low confidence -> abstain flag available via threshold sweep results
+
+---
+## For AI agents
+Build/modify flows in the order described here. Every stage needs loading, empty, error, and success states — not just the happy path.

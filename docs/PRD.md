@@ -28,3 +28,7 @@ Researchers (primary), students, developers building attention-aware apps.
 
 ## Out of scope
 Clinical diagnosis, real-time neurofeedback control, hardware certification.
+
+---
+## For AI agents
+Read this before writing any code. Build only **Must** features. If a request isn't in this PRD, ask before adding it. Success = the measurable goals above, verified by the metrics in TESTING.md.

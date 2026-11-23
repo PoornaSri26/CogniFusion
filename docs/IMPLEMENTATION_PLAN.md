@@ -14,3 +14,7 @@
 
 ## Rules for agents
 Work one phase at a time; verify with a short training run before pushing; update this doc's status table when a phase completes.
+
+---
+## For AI agents
+Work one phase at a time. Finish and verify it (compile + smoke train), summarize, then stop before the next phase. Update the status table when a phase completes.

@@ -19,3 +19,7 @@
 - Synthetic dataset committed as features.parquet (621 KB); raw epochs and 1.5 GB real CSV never committed
 - Muse EEG + webcam paths unverified without hardware - documented honestly
 - Real-data feature build is hours-scale; parquet reuse path provided
+
+---
+## For AI agents
+Use only the stack listed here. If another library seems needed, explain why and ask first. Never swap PyTorch/LightGBM/scikit-learn for alternatives without updating this doc.

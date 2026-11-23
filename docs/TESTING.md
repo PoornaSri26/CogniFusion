@@ -24,3 +24,7 @@
 
 ## Commands
 `python -m compileall src data dashboard.py` ; `python src/train.py --features data/processed/features.parquet --epochs 15 --cv 0`
+
+---
+## For AI agents
+For every change, run the verification commands above. Do not call a feature done until its test case passes. Add a row to the table when adding a feature.

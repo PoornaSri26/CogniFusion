@@ -15,3 +15,7 @@
 - No hardcoded hex in dashboard - use named constants at top of file
 - Every plot must have axis labels and a title
 - Accessibility: sufficient contrast, no color-only encoding (add text/hatch)
+
+---
+## For AI agents
+Use only the tokens/patterns defined here. Never hardcode colors, fonts, or spacing. If a token is missing, propose one instead of inventing a value.

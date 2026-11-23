@@ -18,3 +18,7 @@
 - [ ] .gitignore covers data/raw, sessions, logs.db
 - [ ] No hardcoded paths with usernames in committed code (use Path/relative)
 - [ ] Checkpoint files scanned for embedded absolute paths before sharing
+
+---
+## For AI agents
+Review every change against this doc before considering it done. List violations with file+line and propose fixes. Never commit secrets or biometric raw data.
