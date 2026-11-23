@@ -225,6 +225,25 @@ summary = manager.process_epoch(
 )
 ```
 
+## 📚 Documentation
+
+Full project docs live in [`docs/`](docs/) — written for both humans and AI coding agents:
+
+| Doc | Question it answers |
+|-----|---------------------|
+| [PRD](docs/PRD.md) | What are we building and for whom? |
+| [TRD](docs/TRD.md) | Which technologies and requirements? |
+| [APP_FLOW](docs/APP_FLOW.md) | How does the user move through the system? |
+| [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md) | What gets built in which order? |
+| [BACKEND_SCHEMA](docs/BACKEND_SCHEMA.md) | What data is stored and how is it related? |
+| [TESTING](docs/TESTING.md) | How do we verify it works? |
+| [DESIGN_SYSTEM](docs/DESIGN_SYSTEM.md) | How should it look and behave? |
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | How do the parts fit together? |
+| [SECURITY](docs/SECURITY.md) | How are users, data, and secrets protected? |
+| [CODE_STYLE](docs/CODE_STYLE.md) | How should code be written? |
+
+🤖 **AI agents:** start with [`AGENTS.md`](AGENTS.md) — it maps every question to its doc.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
