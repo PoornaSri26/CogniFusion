@@ -39,6 +39,17 @@ class ModalityEncoder(nn.Module):
         return self.out(h)
 
 
+class _GradReverse(torch.autograd.Function):
+    """Gradient Reversal Layer: forward identity, backward -lambda * grad."""
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambd * grad_output, None
+
+
 class AttentionFusionNet(nn.Module):
     """
     High-accuracy attention fusion network.
@@ -52,7 +63,7 @@ class AttentionFusionNet(nn.Module):
         temporal context — the single biggest gain on real data.
     """
     def __init__(self, eeg_dim, eye_dim, embed_dim=48, n_classes=3,
-                 aux_heads=True, gate_type="vector", seq_len=1):
+                 aux_heads=True, gate_type="vector", seq_len=1, n_domains=0):
         super().__init__()
         self.embed_dim = embed_dim
         self.gate_type = gate_type
@@ -94,6 +105,12 @@ class AttentionFusionNet(nn.Module):
                                           nn.Linear(32, n_classes))
             self.eye_head = nn.Sequential(nn.Linear(embed_dim, 32), nn.GELU(),
                                           nn.Linear(32, n_classes))
+        # Optional subject-discriminator head for domain-adversarial (GRL) training
+        self.domain_head = None
+        if n_domains > 0:
+            self.domain_head = nn.Sequential(
+                nn.Linear(embed_dim, 64), nn.GELU(), nn.Dropout(0.1),
+                nn.Linear(64, n_domains))
 
     @staticmethod
     def _moments(x):
@@ -170,7 +187,7 @@ class AttentionFusionNet(nn.Module):
         return logits
 
     def forward(self, eeg_x, eye_x, return_weight=False, modality_dropout=0.0,
-                seq_hidden=None):
+                seq_hidden=None, subject_labels=None, grl_lambda=0.0):
         if eeg_x.dim() == 3 and self.use_gru:
             return self._forward_seq(eeg_x, eye_x, return_weight, modality_dropout)
         # MixStyle domain augmentation during training
@@ -193,6 +210,12 @@ class AttentionFusionNet(nn.Module):
         w = self.gate(gate_input)
         fused = w * e_eeg + (1.0 - w) * e_eye
 
+        domain_loss = None
+        if (subject_labels is not None and self.domain_head is not None
+                and grl_lambda > 0):
+            rev = _GradReverse.apply(fused, grl_lambda)
+            domain_loss = F.cross_entropy(self.domain_head(rev), subject_labels)
+
         # Optional GRU temporal context
         gru_ctx = None
         new_hidden = None
@@ -212,6 +235,8 @@ class AttentionFusionNet(nn.Module):
 
         if self.training and self.aux_heads:
             aux = (self.eeg_head(e_eeg), self.eye_head(e_eye))
+            if domain_loss is not None:
+                aux = aux + (domain_loss,)
             if return_weight:
                 return logits, w_summary, aux
             return logits, aux

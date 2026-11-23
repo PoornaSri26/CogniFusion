@@ -174,7 +174,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                epochs=300, lr=3e-4, weight_decay=1e-3, aux_weight=0.25,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
-               ema_eval=True, use_gbm=False, seq_len=1, ablate=None, seed=42, verbose=True):
+               ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -215,9 +215,19 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         if verbose:
             print(f"    seq_len={seq_len}: {len(y_tr_np)} train / {len(y_te_np)} test windows")
 
+    # subject ids for domain-adversarial (GRL) training
+    if grl:
+        subs = sorted(train_df["subject"].unique())
+        smap = {s: i for i, s in enumerate(subs)}
+        s_tr_np = train_df["subject"].map(smap).to_numpy()
+        n_domains = len(subs)
+    else:
+        s_tr_np = np.zeros(len(y_tr_np), dtype=np.int64); n_domains = 0
+
     eeg_tr_t = torch.tensor(eeg_tr_np, dtype=torch.float32)
     eye_tr_t = torch.tensor(eye_tr_np, dtype=torch.float32)
     y_tr_t   = torch.tensor(y_tr_np,   dtype=torch.long)
+    s_tr_t   = torch.tensor(s_tr_np,   dtype=torch.long)
     eeg_te_t = torch.tensor(eeg_te_np, dtype=torch.float32)
     eye_te_t = torch.tensor(eye_te_np, dtype=torch.float32)
     y_te_t   = torch.tensor(y_te_np,   dtype=torch.long)
@@ -238,7 +248,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     model = AttentionFusionNet(
         eeg_dim=len(eeg_cols), eye_dim=len(eye_cols),
         embed_dim=embed_dim, n_classes=len(LABELS), gate_type="vector",
-        seq_len=seq_len,
+        seq_len=seq_len, n_domains=n_domains,
     )
 
     # --- optimizer: AdamW + cosine annealing with warm restarts ---
@@ -249,7 +259,10 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     sched = torch.optim.lr_scheduler.SequentialLR(opt, [warmup_sched, cosine_sched], milestones=[10])
 
     # --- mini-batch DataLoader ---
-    dataset = TensorDataset(eeg_tr_t, eye_tr_t, y_tr_t)
+    if grl:
+        dataset = TensorDataset(eeg_tr_t, eye_tr_t, y_tr_t, s_tr_t)
+    else:
+        dataset = TensorDataset(eeg_tr_t, eye_tr_t, y_tr_t)
     loader  = DataLoader(dataset, batch_size=min(batch_size, len(dataset)),
                          shuffle=True, drop_last=len(dataset) > batch_size)
 
@@ -260,13 +273,23 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     for epoch in range(epochs):
         model.train()
         ep_loss = 0.0
-        for eeg_b, eye_b, y_b in loader:
+        for batch in loader:
+            if grl:
+                eeg_b, eye_b, y_b, s_b = batch
+            else:
+                eeg_b, eye_b, y_b = batch; s_b = None
             opt.zero_grad()
-            # Mixup augmentation
-            eeg_m, eye_m, y_a, y_b2, lam = mixup_data(eeg_b, eye_b, y_b, alpha=mixup_alpha)
-            logits, aux = model(eeg_m, eye_m, modality_dropout=modality_dropout)
+            # Mixup conflicts with subject labels — disable under GRL
+            eeg_m, eye_m, y_a, y_b2, lam = mixup_data(
+                eeg_b, eye_b, y_b, alpha=0.0 if grl else mixup_alpha)
+            kw = dict(modality_dropout=modality_dropout)
+            if grl:
+                kw.update(subject_labels=s_b, grl_lambda=grl_lambda)
+            logits, aux = model(eeg_m, eye_m, **kw)
             loss = mixup_loss(criterion_main, logits, y_a, y_b2, lam)
             loss = loss + aux_weight * (criterion_aux(aux[0], y_a) + criterion_aux(aux[1], y_a))
+            if grl and len(aux) > 2:
+                loss = loss + grl_weight * aux[2]
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             opt.step()
@@ -362,6 +385,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "embed_dim":       embed_dim,
         "seq_len":         seq_len,
         "ablate":          ablate,
+        "grl":             grl,
     }
     return fold_record, macro_f1
 
@@ -379,7 +403,8 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          weight_decay=1e-3, aux_weight=0.25, modality_dropout=0.15,
          embed_dim=48, mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
          use_focal=True, focal_gamma=2.0, ema_eval=True, use_gbm=False,
-         seq_len=1, ablate=None, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         seq_len=1, ablate=None, grl=False,
+         grl_lambda=1.0, grl_weight=0.1, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -418,7 +443,8 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             embed_dim=embed_dim, use_focal=use_focal, focal_gamma=focal_gamma,
             mixup_alpha=mixup_alpha, batch_size=batch_size,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
-            use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, seed=seed + i)
+            use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, grl=grl,
+            grl_lambda=grl_lambda, grl_weight=grl_weight, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -478,6 +504,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-ema-eval",   dest="ema_eval", action="store_false")
     parser.add_argument("--use-gbm",       action="store_true", default=False,
                         help="Stack LightGBM on top of neural network (pip install lightgbm)")
+    parser.add_argument("--grl",          action="store_true",
+                        help="Domain-adversarial subject invariance (GRL)")
+    parser.add_argument("--grl-lambda",   type=float, default=1.0)
+    parser.add_argument("--grl-weight",   type=float, default=0.1)
     parser.add_argument("--ablate",       choices=["eeg","eye"], default=None,
                         help="Zero out one modality for baseline comparison")
     parser.add_argument("--seq-len",      type=int,   default=1,
@@ -494,5 +524,6 @@ if __name__ == "__main__":
         mixup_alpha=args.mixup_alpha, batch_size=args.batch_size,
         label_smoothing=args.label_smoothing, use_focal=args.use_focal,
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
-        seq_len=args.seq_len, ablate=args.ablate, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        seq_len=args.seq_len, ablate=args.ablate, grl=args.grl,
+        grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )
