@@ -225,6 +225,16 @@ summary = manager.process_epoch(
 )
 ```
 
+## 📊 Results (synthetic 30-subject CV)
+
+**99.7% mean accuracy / macro-F1** across subject-wise folds — pipeline validation
+numbers; real-data performance will be lower and is the honest metric.
+
+![Confusion matrix](https://raw.githubusercontent.com/PoornaSri26/CogniFusion/main/docs/figures/confusion_matrix.png)
+![ROC curves](https://raw.githubusercontent.com/PoornaSri26/CogniFusion/main/docs/figures/roc_curves.png)
+![Per-class accuracy](https://raw.githubusercontent.com/PoornaSri26/CogniFusion/main/docs/figures/per_class.png)
+![Feature importance](https://raw.githubusercontent.com/PoornaSri26/CogniFusion/main/docs/figures/feature_importance.png)
+
 ## 📚 Documentation
 
 Full project docs live in [`docs/`](docs/) — written for both humans and AI coding agents:
