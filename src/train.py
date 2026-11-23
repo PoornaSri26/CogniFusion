@@ -127,6 +127,18 @@ def mixup_loss(criterion, logits, y_a, y_b, lam):
 
 
 # -------------------------------------------------------- temperature scaling
+class GCELoss(nn.Module):
+    """Generalized Cross Entropy — robust to noisy labels (q in (0,1])."""
+    def __init__(self, q=0.7, weight=None):
+        super().__init__(); self.q = q; self.weight = weight
+    def forward(self, logits, target):
+        p = torch.softmax(logits, dim=1).gather(1, target.unsqueeze(1)).squeeze(1).clamp(min=1e-8)
+        loss = (1 - p ** self.q) / self.q
+        if self.weight is not None:
+            loss = loss * self.weight.to(logits.device)[target]
+        return loss.mean()
+
+
 class TemperatureScaler(nn.Module):
     """Learned scalar T that re-calibrates over-confident softmax outputs."""
     def __init__(self):
@@ -176,7 +188,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
                ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, swa=False,
-               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, seed=42, verbose=True):
+               teacher_path=None, kd_alpha=0.7, kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, gce_q=0.0, sam_rho=0.0, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -239,7 +251,10 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     class_weights = counts.sum() / (len(counts) * counts.clamp(min=1))
 
     # --- losses ---
-    if use_focal:
+    if gce_q > 0:
+        criterion_main = GCELoss(q=gce_q, weight=class_weights)
+        criterion_aux  = GCELoss(q=gce_q, weight=class_weights)
+    elif use_focal:
         criterion_main = FocalLoss(weight=class_weights, gamma=focal_gamma)
         criterion_aux  = FocalLoss(weight=class_weights, gamma=focal_gamma)
     else:
@@ -348,9 +363,33 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                     torch.log_softmax(logits / kd_temp, dim=1), tp_b,
                     reduction="batchmean") * (kd_temp ** 2)
                 loss = loss + kd_alpha * kd_loss
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            opt.step()
+            if sam_rho > 0:
+                # SAM: (1) ascent to adversarial weights, (2) restore, (3) descent
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                with torch.no_grad():
+                    grad_norm = torch.sqrt(sum((p.grad**2).sum() for p in model.parameters() if p.grad is not None))
+                    scale = sam_rho / (grad_norm + 1e-12)
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            p.add_(p.grad * scale)
+                opt.zero_grad()
+                logits2, aux2 = model(eeg_m, eye_m, **kw)
+                loss2 = mixup_loss(criterion_main, logits2, y_a, y_b2, lam)
+                loss2 = loss2 + aux_weight * (criterion_aux(aux2[0], y_a) + criterion_aux(aux2[1], y_a))
+                if grl and len(aux2) > 2:
+                    loss2 = loss2 + grl_weight * aux2[2]
+                if teacher_probs is not None:
+                    kd2 = F.kl_div(torch.log_softmax(logits2 / kd_temp, dim=1), tp_b,
+                                   reduction="batchmean") * (kd_temp ** 2)
+                    loss2 = loss2 + kd_alpha * kd2
+                loss2.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                opt.step()
+            else:
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                opt.step()
             if ema_state is not None:
                 with torch.no_grad():
                     msd = model.state_dict()
@@ -505,6 +544,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "feat_dropout":     feat_dropout,
         "ema_decay":        ema_decay,
         "cutmix":           cutmix,
+        "gce_q":            gce_q, "sam_rho": sam_rho,
     }
     return fold_record, macro_f1
 
@@ -525,7 +565,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          seq_len=1, ablate=None, grl=False,
          grl_lambda=1.0, grl_weight=0.1,
          swa=False, teacher_path=None, kd_alpha=0.7,
-         kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         kd_temp=2.0, feat_noise=0.0, feat_dropout=0.0, ema_decay=0.0, cutmix=0.0, gce_q=0.0, sam_rho=0.0, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -566,7 +606,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
             use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, grl=grl,
             grl_lambda=grl_lambda, grl_weight=grl_weight, swa=swa, teacher_path=teacher_path, kd_alpha=kd_alpha,
-            kd_temp=kd_temp, feat_noise=feat_noise, feat_dropout=feat_dropout, ema_decay=ema_decay, cutmix=cutmix, seed=seed + i)
+            kd_temp=kd_temp, feat_noise=feat_noise, feat_dropout=feat_dropout, ema_decay=ema_decay, cutmix=cutmix, gce_q=gce_q, sam_rho=sam_rho, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -634,6 +674,10 @@ if __name__ == "__main__":
                         help="Path to teacher checkpoint for knowledge distillation")
     parser.add_argument("--kd-alpha",     type=float, default=0.7)
     parser.add_argument("--kd-temp",      type=float, default=2.0)
+    parser.add_argument("--gce-q",        type=float, default=0.0,
+                        help="Generalized CE q for noisy labels (0=off, e.g. 0.7)")
+    parser.add_argument("--sam-rho",      type=float, default=0.0,
+                        help="SAM perturbation radius (0=off, e.g. 0.05)")
     parser.add_argument("--cutmix",       type=float, default=0.0,
                         help="Feature-span CutMix fraction (0 disables)")
     parser.add_argument("--ema-decay",    type=float, default=0.0,
@@ -662,5 +706,5 @@ if __name__ == "__main__":
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
         seq_len=args.seq_len, ablate=args.ablate, grl=args.grl,
         grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, swa=args.swa, teacher_path=args.teacher, kd_alpha=args.kd_alpha,
-        kd_temp=args.kd_temp, feat_noise=args.feat_noise, feat_dropout=args.feat_dropout, ema_decay=args.ema_decay, cutmix=args.cutmix, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        kd_temp=args.kd_temp, feat_noise=args.feat_noise, feat_dropout=args.feat_dropout, ema_decay=args.ema_decay, cutmix=args.cutmix, gce_q=args.gce_q, sam_rho=args.sam_rho, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )
