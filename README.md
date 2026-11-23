@@ -66,6 +66,12 @@ python src/build_dataset.py
 
 # Train model
 python src/train.py
+
+# Research / ablation variants
+python src/train.py --seq-len 3 --cv 5 --use-gbm   # GRU temporal model
+python src/train.py --ablate eye --cv 5             # EEG-only baseline
+python src/train.py --ablate eeg --cv 5             # eye-only baseline
+python src/train.py --cv 30 --epochs 60             # leave-one-subject-out
 ```
 
 > **Note:** `data/raw/`, `data/processed/`, `models/` and `dashboard_state.json`
