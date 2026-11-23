@@ -174,7 +174,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                epochs=300, lr=3e-4, weight_decay=1e-3, aux_weight=0.25,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
-               ema_eval=True, use_gbm=False, seq_len=1, seed=42, verbose=True):
+               ema_eval=True, use_gbm=False, seq_len=1, ablate=None, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -192,6 +192,12 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     eye_tr_np = np.nan_to_num(scaler_eye.fit_transform(eye_tr_norm))
     eeg_te_np = np.nan_to_num(scaler_eeg.transform(eeg_te_norm))
     eye_te_np = np.nan_to_num(scaler_eye.transform(eye_te_norm))
+
+    # --- modality ablation baseline: zero out one modality entirely ---
+    if ablate == "eeg":
+        eeg_tr_np[:] = 0.0; eeg_te_np[:] = 0.0
+    elif ablate == "eye":
+        eye_tr_np[:] = 0.0; eye_te_np[:] = 0.0
 
     y_tr_np = le.transform(train_df["label"])
     y_te_np = le.transform(test_df["label"])
@@ -309,7 +315,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
 
     # --- Optional LightGBM stacked ensemble ---
     lgb_model = None
-    if use_gbm:
+    if use_gbm and not ablate:
         try:
             import lightgbm as lgb
             X_tr_all = np.concatenate([eeg_tr_ep, eye_tr_ep], axis=1)
@@ -355,6 +361,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "history":         history,
         "embed_dim":       embed_dim,
         "seq_len":         seq_len,
+        "ablate":          ablate,
     }
     return fold_record, macro_f1
 
@@ -372,7 +379,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          weight_decay=1e-3, aux_weight=0.25, modality_dropout=0.15,
          embed_dim=48, mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
          use_focal=True, focal_gamma=2.0, ema_eval=True, use_gbm=False,
-         seq_len=1, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         seq_len=1, ablate=None, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -411,7 +418,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             embed_dim=embed_dim, use_focal=use_focal, focal_gamma=focal_gamma,
             mixup_alpha=mixup_alpha, batch_size=batch_size,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
-            use_gbm=use_gbm, seq_len=seq_len, seed=seed + i)
+            use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -471,6 +478,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-ema-eval",   dest="ema_eval", action="store_false")
     parser.add_argument("--use-gbm",       action="store_true", default=False,
                         help="Stack LightGBM on top of neural network (pip install lightgbm)")
+    parser.add_argument("--ablate",       choices=["eeg","eye"], default=None,
+                        help="Zero out one modality for baseline comparison")
     parser.add_argument("--seq-len",      type=int,   default=1,
                         help="GRU sequence length in epochs (1=disabled, e.g. 3)")
     parser.add_argument("--cv",           type=int,   default=0)
@@ -485,5 +494,5 @@ if __name__ == "__main__":
         mixup_alpha=args.mixup_alpha, batch_size=args.batch_size,
         label_smoothing=args.label_smoothing, use_focal=args.use_focal,
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
-        seq_len=args.seq_len, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        seq_len=args.seq_len, ablate=args.ablate, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )
