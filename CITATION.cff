@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+title: CogniFusion
+type: software
+authors:
+  - family-names: Sri
+    given-names: Poorna
+repository-code: https://github.com/PoornaSri26/CogniFusion
+license: MIT
+version: 1.0.0
