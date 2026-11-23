@@ -92,6 +92,7 @@ def load_model(model_path="models/fusion_model.pt"):
                 embed_dim=rec_embed,
                 n_classes=len(ckpt["label_classes"]),
                 gate_type=gate_type,
+                seq_len=rec.get("seq_len", 1),
             )
             model.load_state_dict(rec["model_state"])
             model.eval()
@@ -100,6 +101,7 @@ def load_model(model_path="models/fusion_model.pt"):
                 "scaler_eeg": rec["scaler_eeg"],
                 "scaler_eye": rec["scaler_eye"],
                 "lgb_model":  rec.get("lgb_model"),   # None if GBM not trained
+                "seq_hidden": None,                  # GRU state for seq_len>1 folds
             }
             folds.append(fold_entry)
         cv = ckpt.get("cv_summary", {})
@@ -314,9 +316,14 @@ def run(eeg_source="synthetic", eye_source="synthetic", n_cycles=None,
                 for fold in folds:
                     xe = fold["scaler_eeg"].transform(pd.DataFrame(eeg_in, columns=eeg_cols))
                     ye = fold["scaler_eye"].transform(pd.DataFrame(eye_in, columns=eye_cols))
-                    logits, w = fold["model"](torch.tensor(xe, dtype=torch.float32),
-                                              torch.tensor(ye, dtype=torch.float32),
-                                              return_weight=True)
+                    _out = fold["model"](torch.tensor(xe, dtype=torch.float32),
+                                        torch.tensor(ye, dtype=torch.float32),
+                                        return_weight=True,
+                                        seq_hidden=fold.get("seq_hidden"))
+                    if len(_out) == 3:
+                        logits, w, fold["seq_hidden"] = _out
+                    else:
+                        logits, w = _out
                     nn_probs = torch.softmax(logits, dim=1).numpy()[0]
                     # Stack LightGBM if present in this fold (v3 checkpoint)
                     lgb_model = fold.get("lgb_model")

@@ -155,11 +155,26 @@ def calibrate_temperature(model, eeg_val, eye_val, y_val, n_iter=200, lr=0.02):
 
 
 # ------------------------------------------------------------------- training
+def make_seq_windows(df, eeg_np, eye_np, y_np, seq_len):
+    """Non-overlapping per-subject windows of seq_len consecutive epochs.
+    Window label = label of its LAST epoch (blocks are same-label per subject)."""
+    subj = df["subject"].to_numpy()
+    order = df["epoch_id"].to_numpy() if "epoch_id" in df.columns else np.arange(len(df))
+    eeg_w, eye_w, y_w = [], [], []
+    for s in pd.unique(subj):
+        pos = np.where(subj == s)[0]
+        pos = pos[np.argsort(order[pos], kind="stable")]
+        for i in range(0, len(pos) - seq_len + 1, seq_len):
+            w = pos[i:i + seq_len]
+            eeg_w.append(eeg_np[w]); eye_w.append(eye_np[w]); y_w.append(y_np[w[-1]])
+    return np.asarray(eeg_w), np.asarray(eye_w), np.asarray(y_w)
+
+
 def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                epochs=300, lr=3e-4, weight_decay=1e-3, aux_weight=0.25,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
-               ema_eval=True, use_gbm=False, seed=42, verbose=True):
+               ema_eval=True, use_gbm=False, seq_len=1, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -180,6 +195,19 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
 
     y_tr_np = le.transform(train_df["label"])
     y_te_np = le.transform(test_df["label"])
+
+    # GBM always trains on per-epoch features (pipeline inference is per-epoch)
+    eeg_tr_ep, eye_tr_ep, y_tr_ep = eeg_tr_np, eye_tr_np, y_tr_np.copy()
+    eeg_te_ep, eye_te_ep, y_te_ep = eeg_te_np, eye_te_np, y_te_np.copy()
+
+    # --- optional sequence windows (GRU path): group consecutive epochs ---
+    if seq_len > 1:
+        eeg_tr_np, eye_tr_np, y_tr_np = make_seq_windows(
+            train_df, eeg_tr_np, eye_tr_np, y_tr_np, seq_len)
+        eeg_te_np, eye_te_np, y_te_np = make_seq_windows(
+            test_df, eeg_te_np, eye_te_np, y_te_np, seq_len)
+        if verbose:
+            print(f"    seq_len={seq_len}: {len(y_tr_np)} train / {len(y_te_np)} test windows")
 
     eeg_tr_t = torch.tensor(eeg_tr_np, dtype=torch.float32)
     eye_tr_t = torch.tensor(eye_tr_np, dtype=torch.float32)
@@ -203,7 +231,8 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     # --- model ---
     model = AttentionFusionNet(
         eeg_dim=len(eeg_cols), eye_dim=len(eye_cols),
-        embed_dim=embed_dim, n_classes=len(LABELS), gate_type="vector"
+        embed_dim=embed_dim, n_classes=len(LABELS), gate_type="vector",
+        seq_len=seq_len,
     )
 
     # --- optimizer: AdamW + cosine annealing with warm restarts ---
@@ -283,8 +312,8 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     if use_gbm:
         try:
             import lightgbm as lgb
-            X_tr_all = np.concatenate([eeg_tr_np, eye_tr_np], axis=1)
-            X_te_all = np.concatenate([eeg_te_np, eye_te_np], axis=1)
+            X_tr_all = np.concatenate([eeg_tr_ep, eye_tr_ep], axis=1)
+            X_te_all = np.concatenate([eeg_te_ep, eye_te_ep], axis=1)
             lgb_clf = lgb.LGBMClassifier(
                 n_estimators=600, learning_rate=0.05, max_depth=6,
                 num_leaves=63, min_child_samples=15,
@@ -292,10 +321,13 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                 reg_alpha=0.1, reg_lambda=0.3,
                 class_weight='balanced', random_state=seed, n_jobs=-1
             )
-            lgb_clf.fit(X_tr_all, y_tr_np)
+            lgb_clf.fit(X_tr_all, y_tr_ep)
             lgb_probs = lgb_clf.predict_proba(X_te_all)
-            # Stack: 60% NN + 40% LightGBM
-            probs = 0.60 * probs + 0.40 * lgb_probs
+            if len(lgb_probs) == len(probs):
+                probs = 0.60 * probs + 0.40 * lgb_probs
+            else:
+                if verbose:
+                    print("    seq_len>1: GBM blend skipped (per-epoch vs window mismatch)")
             preds = probs.argmax(1)
             lgb_model = lgb_clf
             if verbose:
@@ -322,6 +354,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "val_accuracy":    float(acc),
         "history":         history,
         "embed_dim":       embed_dim,
+        "seq_len":         seq_len,
     }
     return fold_record, macro_f1
 
@@ -339,7 +372,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          weight_decay=1e-3, aux_weight=0.25, modality_dropout=0.15,
          embed_dim=48, mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
          use_focal=True, focal_gamma=2.0, ema_eval=True, use_gbm=False,
-         cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         seq_len=1, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -378,7 +411,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             embed_dim=embed_dim, use_focal=use_focal, focal_gamma=focal_gamma,
             mixup_alpha=mixup_alpha, batch_size=batch_size,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
-            use_gbm=use_gbm, seed=seed + i)
+            use_gbm=use_gbm, seq_len=seq_len, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -438,6 +471,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-ema-eval",   dest="ema_eval", action="store_false")
     parser.add_argument("--use-gbm",       action="store_true", default=False,
                         help="Stack LightGBM on top of neural network (pip install lightgbm)")
+    parser.add_argument("--seq-len",      type=int,   default=1,
+                        help="GRU sequence length in epochs (1=disabled, e.g. 3)")
     parser.add_argument("--cv",           type=int,   default=0)
     parser.add_argument("--test-frac",    type=float, default=0.25)
     parser.add_argument("--out",          dest="out_prefix", default="models/fusion_model")
@@ -450,5 +485,5 @@ if __name__ == "__main__":
         mixup_alpha=args.mixup_alpha, batch_size=args.batch_size,
         label_smoothing=args.label_smoothing, use_focal=args.use_focal,
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
-        cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        seq_len=args.seq_len, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )

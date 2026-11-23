@@ -119,8 +119,60 @@ class AttentionFusionNet(nn.Module):
         var_mix = lam * var + (1 - lam) * var[perm]
         return x_norm * var_mix.sqrt() + mu_mix
 
+    def _forward_seq(self, eeg_x, eye_x, return_weight=False, modality_dropout=0.0):
+        # Batched sequence path: eeg_x/eye_x are (B, T, F). Encode every
+        # timestep, run the vector gate per step, then GRU over time and
+        # classify from the final timestep's representation.
+        B, T = eeg_x.shape[0], eeg_x.shape[1]
+        n = B * T
+        flat_e = eeg_x.reshape(n, -1)
+        flat_y = eye_x.reshape(n, -1)
+
+        if self.training:
+            flat_e = self.mixstyle(flat_e)
+            flat_y = self.mixstyle(flat_y)
+
+        e_eeg = self.eeg_enc(flat_e)                     # (n, E)
+        e_eye = self.eye_enc(flat_y)                     # (n, E)
+
+        if self.training and modality_dropout > 0:
+            drop_eeg = torch.rand(n, 1, device=e_eeg.device) < (modality_dropout / 2)
+            drop_eye = (torch.rand(n, 1, device=e_eye.device) < (modality_dropout / 2)) & ~drop_eeg
+            e_eeg = e_eeg * (~drop_eeg).float()
+            e_eye = e_eye * (~drop_eye).float()
+
+        gate_input = torch.cat([e_eeg, e_eye, self._moments(e_eeg), self._moments(e_eye)], dim=1)
+        w = self.gate(gate_input)                        # (n, E)
+        fused = w * e_eeg + (1.0 - w) * e_eye            # (n, E)
+
+        E = fused.shape[1]
+        fused3 = fused.view(B, T, E)
+        gru_out, _ = self.gru(fused3)                    # (B, T, E)
+        gru_ctx = gru_out[:, -1]                         # last timestep
+
+        # last-timestep representations for the classifier + aux heads
+        e_eeg_t = e_eeg.view(B, T, E)[:, -1]
+        e_eye_t = e_eye.view(B, T, E)[:, -1]
+        fused_t = fused.view(B, T, E)[:, -1]
+        w_t = w.view(B, T, E)[:, -1]
+
+        clf_inp = torch.cat([fused_t, e_eeg_t, e_eye_t, gru_ctx], dim=1)
+        logits = self.classifier(clf_inp)
+
+        w_summary = w_t.mean(dim=1, keepdim=True) if self.gate_type == "vector" else w_t
+        if self.training and self.aux_heads:
+            aux = (self.eeg_head(e_eeg_t), self.eye_head(e_eye_t))
+            if return_weight:
+                return logits, w_summary, aux
+            return logits, aux
+        if return_weight:
+            return logits, w_summary
+        return logits
+
     def forward(self, eeg_x, eye_x, return_weight=False, modality_dropout=0.0,
                 seq_hidden=None):
+        if eeg_x.dim() == 3 and self.use_gru:
+            return self._forward_seq(eeg_x, eye_x, return_weight, modality_dropout)
         # MixStyle domain augmentation during training
         if self.training:
             eeg_x = self.mixstyle(eeg_x)
