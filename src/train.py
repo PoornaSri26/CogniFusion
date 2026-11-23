@@ -174,7 +174,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
                epochs=300, lr=3e-4, weight_decay=1e-3, aux_weight=0.25,
                modality_dropout=0.15, embed_dim=48, use_focal=True, focal_gamma=2.0,
                mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
-               ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, seed=42, verbose=True):
+               ema_eval=True, use_gbm=False, seq_len=1, ablate=None, grl=False, grl_lambda=1.0, grl_weight=0.1, swa=False, seed=42, verbose=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -269,6 +269,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
     best_val_f1 = 0.0
     best_state  = None
     history = []
+    swa_state = None; swa_count = 0
 
     for epoch in range(epochs):
         model.train()
@@ -309,12 +310,42 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
             if val_f1 > best_val_f1:
                 best_val_f1 = val_f1
                 best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            if swa:
+                cur = model.state_dict()
+                if swa_state is None:
+                    swa_state = {k: v.detach().clone().float() for k, v in cur.items()}
+                else:
+                    for k in swa_state:
+                        swa_state[k] += cur[k].detach().float()
+                swa_count += 1
             if verbose and (epoch + 1) % 50 == 0:
                 print(f"    epoch {epoch+1:3d} | loss {ep_loss/len(loader):.4f} | val_f1 {val_f1:.3f}")
 
     # --- Restore best checkpoint ---
     if best_state is not None:
         model.load_state_dict(best_state)
+
+    # --- Optional SWA: average weights across eval snapshots, keep if better ---
+    if swa and swa_state is not None and swa_count > 1:
+        avg = {k: (v / swa_count).to(best_state[k].dtype if best_state else v.dtype)
+               for k, v in swa_state.items()}
+        cand = {k: v.clone() for k, v in model.state_dict().items()}
+        model.load_state_dict(avg)
+        model.eval()
+        with torch.no_grad():
+            lte, _ = model(eeg_te_t, eye_te_t, return_weight=True)
+            f1_swa = f1_score(y_te_np, lte.argmax(1).numpy(), average="macro")
+        if f1_swa >= best_val_f1:
+            best_val_f1 = f1_swa
+            best_state = avg
+            if verbose:
+                print(f"    SWA accepted: val_f1 {f1_swa:.3f}")
+        else:
+            model.load_state_dict(cand)
+            if verbose:
+                print(f"    SWA rejected: {f1_swa:.3f} < {best_val_f1:.3f}")
+        if best_state is not None:
+            model.load_state_dict(best_state)
 
     # --- Temperature scaling calibration ---
     temp_scaler = calibrate_temperature(model, eeg_te_t, eye_te_t, y_te_t)
@@ -386,6 +417,7 @@ def train_fold(train_df, test_df, eeg_cols, eye_cols, le, *,
         "seq_len":         seq_len,
         "ablate":          ablate,
         "grl":             grl,
+        "swa":             swa,
     }
     return fold_record, macro_f1
 
@@ -404,7 +436,8 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
          embed_dim=48, mixup_alpha=0.4, batch_size=256, label_smoothing=0.1,
          use_focal=True, focal_gamma=2.0, ema_eval=True, use_gbm=False,
          seq_len=1, ablate=None, grl=False,
-         grl_lambda=1.0, grl_weight=0.1, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
+         grl_lambda=1.0, grl_weight=0.1,
+         swa=False, cv=0, test_frac=0.25, out_prefix="models/fusion_model", seed=42):
 
     df = pd.read_parquet(features_path)
     eeg_cols = [c for c in df.columns if c.startswith("eeg__")]
@@ -444,7 +477,7 @@ def main(features_path="data/processed/features.parquet", epochs=300, lr=3e-4,
             mixup_alpha=mixup_alpha, batch_size=batch_size,
             label_smoothing=label_smoothing, ema_eval=ema_eval,
             use_gbm=use_gbm, seq_len=seq_len, ablate=ablate, grl=grl,
-            grl_lambda=grl_lambda, grl_weight=grl_weight, seed=seed + i)
+            grl_lambda=grl_lambda, grl_weight=grl_weight, swa=swa, seed=seed + i)
         fold_records.append(record)
         f1s.append(macro_f1)
         accs.append(record["val_accuracy"])
@@ -508,6 +541,8 @@ if __name__ == "__main__":
                         help="Domain-adversarial subject invariance (GRL)")
     parser.add_argument("--grl-lambda",   type=float, default=1.0)
     parser.add_argument("--grl-weight",   type=float, default=0.1)
+    parser.add_argument("--swa",          action="store_true",
+                        help="Stochastic weight averaging over eval snapshots")
     parser.add_argument("--ablate",       choices=["eeg","eye"], default=None,
                         help="Zero out one modality for baseline comparison")
     parser.add_argument("--seq-len",      type=int,   default=1,
@@ -525,5 +560,5 @@ if __name__ == "__main__":
         label_smoothing=args.label_smoothing, use_focal=args.use_focal,
         focal_gamma=args.focal_gamma, ema_eval=args.ema_eval, use_gbm=args.use_gbm,
         seq_len=args.seq_len, ablate=args.ablate, grl=args.grl,
-        grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
+        grl_lambda=args.grl_lambda, grl_weight=args.grl_weight, swa=args.swa, cv=args.cv, test_frac=args.test_frac, out_prefix=args.out_prefix, seed=args.seed,
     )
